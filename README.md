@@ -9,6 +9,31 @@ point.
 
 A private instance repo is the deployment control plane for one live Hectic installation. It should contain desired state, deployment policy, branding, and extension configuration. It should not contain a long-lived fork of the core source tree.
 
+## What This Repo Is
+
+This repo is:
+
+- a public template repo
+- the starting point for private instance repos such as `acme/hectic-prod`
+- the canonical home for the deployment-control-plane shape customers should use
+
+This repo is not:
+
+- the public core repo
+- a live DemandOps or customer instance
+- a place to store secrets
+- a place to author first-party paid extension source
+
+## Next Proof Step
+
+Use this repo to create or update:
+
+- `DemandOps/hectic-staging`
+- `DemandOps/hectic-prod`
+
+Then prove the deployment model from those private instance repos rather than
+from the core repo.
+
 ## Intended Use
 
 1. Create a private repo from this template structure.
