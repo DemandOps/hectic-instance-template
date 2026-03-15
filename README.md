@@ -2,10 +2,8 @@
 
 This tree is the canonical Hectic instance-template layout.
 
-In the source repo, it is the upstream export source for the published
-`DemandOps/hectic-instance-template` repository. In the published template repo,
-this same tree is the canonical customer deployment-control-plane starting
-point.
+It is the canonical customer deployment-control-plane starting point and the
+published layout for `DemandOps/hectic-instance-template`.
 
 A private instance repo is the deployment control plane for one live Hectic installation. It should contain desired state, deployment policy, branding, and extension configuration. It should not contain a long-lived fork of the core source tree.
 
@@ -28,10 +26,9 @@ This repo is not:
 
 Use this repo to create or update:
 
-- `DemandOps/hectic-staging`
-- `DemandOps/hectic-prod`
+- `DemandOps/hectic-demandops-prod`
 
-Then prove the deployment model from those private instance repos rather than
+Then prove the deployment model from that private instance repo rather than
 from the core repo.
 
 ## Intended Use
