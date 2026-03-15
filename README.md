@@ -2,9 +2,10 @@
 
 This tree is the canonical Hectic instance-template layout.
 
-In the source repo, it is the export source for the eventual public
-`hectic-instance-template` repository. In the published template repo, this same
-tree becomes the canonical customer deployment-control-plane starting point.
+In the source repo, it is the upstream export source for the published
+`DemandOps/hectic-instance-template` repository. In the published template repo,
+this same tree is the canonical customer deployment-control-plane starting
+point.
 
 A private instance repo is the deployment control plane for one live Hectic installation. It should contain desired state, deployment policy, branding, and extension configuration. It should not contain a long-lived fork of the core source tree.
 
@@ -20,10 +21,10 @@ A private instance repo is the deployment control plane for one live Hectic inst
 
 See also:
 
-- [Customer Instance Setup](/Users/adrianmcphee/mydev/hectic/docs/CUSTOMER_INSTANCE_SETUP.md)
-- [Customer FAQ](/Users/adrianmcphee/mydev/hectic/docs/CUSTOMER_FAQ.md)
-- [Customer Onboarding Review](/Users/adrianmcphee/mydev/hectic/docs/CUSTOMER_ONBOARDING_REVIEW.md)
-- [Release Artifact Contract](/Users/adrianmcphee/mydev/hectic/docs/RELEASE_ARTIFACT_CONTRACT.md)
+- [Customer Instance Setup](https://github.com/DemandOps/hectic/blob/main/docs/CUSTOMER_INSTANCE_SETUP.md)
+- [Customer FAQ](https://github.com/DemandOps/hectic/blob/main/docs/CUSTOMER_FAQ.md)
+- [Customer Onboarding Review](https://github.com/DemandOps/hectic/blob/main/docs/CUSTOMER_ONBOARDING_REVIEW.md)
+- [Release Artifact Contract](https://github.com/DemandOps/hectic/blob/main/docs/RELEASE_ARTIFACT_CONTRACT.md)
 
 ## Contents
 

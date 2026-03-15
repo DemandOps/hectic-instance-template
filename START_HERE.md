@@ -26,7 +26,7 @@ The target outcome is:
 7. `branding/site.json`
 8. `security/extension-threat-model.md`
 9. `security/review-checklist.md`
-10. `docs/INSTANCE_AND_EXTENSION_LIFECYCLE.md` in the public core repo when custom extension work is involved
+10. `https://github.com/DemandOps/hectic/blob/main/docs/INSTANCE_AND_EXTENSION_LIFECYCLE.md` when custom extension work is involved
 
 ## Default Rules
 
