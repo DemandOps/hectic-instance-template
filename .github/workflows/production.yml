@@ -1,0 +1,38 @@
+name: Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hectic-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  check-environment:
+    name: Check Environment
+    uses: ./.github/workflows/_check-environment.yml
+    with:
+      environment: production
+    secrets: inherit
+
+  deploy:
+    name: Deploy Production
+    needs: check-environment
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: production
+    secrets: inherit
+
+  verify:
+    name: Verify Production
+    needs: deploy
+    uses: ./.github/workflows/verify-production.yml
+    with:
+      environment: production
+    secrets: inherit

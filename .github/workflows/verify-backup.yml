@@ -1,0 +1,103 @@
+name: Verify PostgreSQL Access
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify PostgreSQL Health
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout instance repo
+        uses: actions/checkout@v4
+
+      - name: Load instance configuration
+        id: config
+        run: |
+          chmod +x scripts/read-instance-config.sh
+          scripts/read-instance-config.sh hectic.instance.yaml >> "$GITHUB_OUTPUT"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" | base64 -d > ~/.ssh/id_ed25519_deploy
+          chmod 600 ~/.ssh/id_ed25519_deploy
+          ssh-keygen -y -f ~/.ssh/id_ed25519_deploy >/dev/null 2>&1 || { echo "Invalid SSH key"; exit 1; }
+
+      - name: Check PostgreSQL client
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<'EOF'
+            if ! command -v psql >/dev/null 2>&1; then
+              echo "ERROR: psql client not installed"
+              exit 1
+            fi
+            psql --version
+          EOF
+
+      - name: Check PostgreSQL connectivity
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            set -a
+            source /opt/hectic/.env
+            set +a
+
+            if [ -z "${DATABASE_DSN:-}" ]; then
+              echo "ERROR: DATABASE_DSN missing from /opt/hectic/.env"
+              exit 1
+            fi
+            psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 \
+              -c "SELECT version();" \
+              -c "SELECT current_database(), current_user, COUNT(*) AS installed_extensions FROM installed_extensions;"
+          EOF
+
+      - name: Check migration ledger
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            set -a
+            source /opt/hectic/.env
+            set +a
+            psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 \
+              -c "SELECT COUNT(*) AS applied_core_migrations FROM public.schema_migrations;" \
+              -c "SELECT COUNT(*) AS extension_packages FROM core_extension_runtime.extension_package_registrations;"
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519_deploy
+
+      - name: Send failure notification
+        if: failure() && steps.config.outputs.email_provider == 'postmark'
+        env:
+          FROM_EMAIL: ${{ steps.config.outputs.email_from_email }}
+          POSTMARK_SERVER_TOKEN: ${{ secrets.POSTMARK_SERVER_TOKEN }}
+          BACKUP_ALERT_EMAIL: ${{ secrets.BACKUP_ALERT_EMAIL }}
+        run: |
+          if [ -z "${POSTMARK_SERVER_TOKEN}" ] || [ -z "${BACKUP_ALERT_EMAIL}" ]; then
+            echo "Skipping notification because POSTMARK_SERVER_TOKEN or BACKUP_ALERT_EMAIL is missing"
+            exit 0
+          fi
+
+          curl -s -X POST "https://api.postmarkapp.com/email" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "X-Postmark-Server-Token: ${POSTMARK_SERVER_TOKEN}" \
+            -d "{
+              \"From\": \"${FROM_EMAIL}\",
+              \"To\": \"${BACKUP_ALERT_EMAIL}\",
+              \"Subject\": \"Hectic PostgreSQL verification failed\",
+              \"TextBody\": \"PostgreSQL connectivity verification failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"MessageStream\": \"outbound\"
+            }" || echo "Failed to send notification"

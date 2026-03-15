@@ -1,0 +1,42 @@
+[Unit]
+Description=Hectic Green Slot (port 8081)
+Documentation=https://github.com/demandops/hectic
+After=network.target
+
+[Service]
+Type=simple
+User=hectic
+Group=hectic
+WorkingDirectory=/opt/hectic
+
+# Green slot binary and port
+ExecStart=/opt/hectic/hectic-green
+Environment=PORT=8081
+
+# Environment file for secrets and configuration
+# NOTE: PORT must NOT be set in .env - each slot controls its own port
+EnvironmentFile=/opt/hectic/.env
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Security hardening
+# Keep filesystem protections relaxed enough for local config, deploy assets,
+# and optional filesystem-backed storage under /opt/hectic.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=2G
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hectic-green
+
+[Install]
+WantedBy=multi-user.target

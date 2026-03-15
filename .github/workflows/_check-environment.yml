@@ -1,0 +1,211 @@
+name: Check Environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment to check
+        required: true
+        type: string
+
+jobs:
+  check-environment:
+    name: Environment Health Check
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout instance repo
+        uses: actions/checkout@v4
+
+      - name: Load instance configuration
+        id: config
+        run: |
+          chmod +x scripts/read-instance-config.sh
+          scripts/read-instance-config.sh hectic.instance.yaml >> "$GITHUB_OUTPUT"
+
+      - name: Validate core secrets
+        env:
+          DATABASE_DSN: ${{ secrets.DATABASE_DSN }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          test -n "${DATABASE_DSN}" || { echo "FATAL: DATABASE_DSN not configured"; exit 1; }
+          test -n "${JWT_SECRET}" || { echo "FATAL: JWT_SECRET not configured"; exit 1; }
+          test -n "${METRICS_TOKEN}" || { echo "FATAL: METRICS_TOKEN not configured"; exit 1; }
+          test -n "${SSH_KEY}" || { echo "FATAL: SSH_KEY not configured"; exit 1; }
+
+      - name: Validate storage secrets
+        if: steps.config.outputs.storage_provider == 's3-compatible'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "${AWS_ACCESS_KEY_ID}" || { echo "FATAL: AWS_ACCESS_KEY_ID not configured"; exit 1; }
+          test -n "${AWS_SECRET_ACCESS_KEY}" || { echo "FATAL: AWS_SECRET_ACCESS_KEY not configured"; exit 1; }
+
+      - name: Validate email secrets
+        env:
+          EMAIL_PROVIDER: ${{ steps.config.outputs.email_provider }}
+          INBOUND_MODE: ${{ steps.config.outputs.inbound_mode }}
+          INBOUND_PROVIDER: ${{ steps.config.outputs.inbound_provider }}
+          POSTMARK_SERVER_TOKEN: ${{ secrets.POSTMARK_SERVER_TOKEN }}
+          POSTMARK_WEBHOOK_SECRET: ${{ secrets.POSTMARK_WEBHOOK_SECRET }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SES_ACCESS_KEY: ${{ secrets.SES_ACCESS_KEY }}
+          SES_SECRET_KEY: ${{ secrets.SES_SECRET_KEY }}
+        run: |
+          case "${EMAIL_PROVIDER}" in
+            postmark)
+              test -n "${POSTMARK_SERVER_TOKEN}" || { echo "FATAL: POSTMARK_SERVER_TOKEN not configured"; exit 1; }
+              ;;
+            smtp)
+              test -n "${SMTP_USERNAME}" || { echo "FATAL: SMTP_USERNAME not configured"; exit 1; }
+              test -n "${SMTP_PASSWORD}" || { echo "FATAL: SMTP_PASSWORD not configured"; exit 1; }
+              ;;
+            ses)
+              test -n "${SES_ACCESS_KEY}" || { echo "FATAL: SES_ACCESS_KEY not configured"; exit 1; }
+              test -n "${SES_SECRET_KEY}" || { echo "FATAL: SES_SECRET_KEY not configured"; exit 1; }
+              ;;
+            mock|none)
+              echo "Skipping outbound email secret checks for provider ${EMAIL_PROVIDER}"
+              ;;
+            *)
+              echo "FATAL: unsupported email provider ${EMAIL_PROVIDER}"
+              exit 1
+              ;;
+          esac
+
+          if [[ "${INBOUND_MODE}" == "webhook" && "${INBOUND_PROVIDER}" == "postmark" ]]; then
+            test -n "${POSTMARK_WEBHOOK_SECRET}" || { echo "FATAL: POSTMARK_WEBHOOK_SECRET not configured"; exit 1; }
+          fi
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" | base64 -d > ~/.ssh/id_ed25519_deploy
+          chmod 600 ~/.ssh/id_ed25519_deploy
+
+          if ! ssh-keygen -y -f ~/.ssh/id_ed25519_deploy >/dev/null 2>&1; then
+            echo "FATAL: invalid SSH key format"
+            exit 1
+          fi
+
+      - name: Check server connectivity
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          if ! ssh -i ~/.ssh/id_ed25519_deploy \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o BatchMode=yes \
+            "hectic@${DEPLOY_HOST}" \
+            "echo 'SSH connection successful'"; then
+            echo "FATAL: cannot connect to deployment server"
+            exit 1
+          fi
+
+      - name: Check systemd services
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy \
+            -o StrictHostKeyChecking=no \
+            "hectic@${DEPLOY_HOST}" << EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            echo "Active slot: \$ACTIVE_SLOT"
+            echo
+
+            echo "=== hectic-\${ACTIVE_SLOT}.service ==="
+            systemctl is-active "hectic-\${ACTIVE_SLOT}" 2>/dev/null && echo "  hectic-\${ACTIVE_SLOT} is running" || echo "  hectic-\${ACTIVE_SLOT} is not running (first deploy?)"
+
+            echo
+            echo "=== caddy.service ==="
+            if systemctl is-enabled caddy >/dev/null 2>&1; then
+              echo "  caddy service: enabled"
+              systemctl is-active caddy && echo "  caddy status: running" || echo "  caddy status: not running"
+            else
+              echo "  caddy service: not installed"
+            fi
+          EOF
+
+      - name: Check disk space
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy \
+            -o StrictHostKeyChecking=no \
+            "hectic@${DEPLOY_HOST}" << 'EOF'
+            AVAILABLE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+            if [ "${AVAILABLE}" -lt 5 ]; then
+              echo "WARNING: low disk space (${AVAILABLE}GB available)"
+            else
+              echo "Sufficient disk space (${AVAILABLE}GB available)"
+            fi
+          EOF
+
+      - name: Check PostgreSQL connectivity
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy \
+            -o StrictHostKeyChecking=no \
+            "hectic@${DEPLOY_HOST}" << 'EOF'
+            set -a
+            source /opt/hectic/.env
+            set +a
+            if [ -z "${DATABASE_DSN:-}" ]; then
+              echo "FATAL: DATABASE_DSN missing from /opt/hectic/.env"
+              exit 1
+            fi
+            psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 -c "SELECT current_database(), current_user;"
+          EOF
+
+      - name: Test S3 connectivity
+        if: steps.config.outputs.storage_provider == 's3-compatible'
+        env:
+          STORAGE_REGION: ${{ steps.config.outputs.storage_region }}
+          STORAGE_ENDPOINT: ${{ steps.config.outputs.storage_endpoint }}
+          ATTACHMENTS_BUCKET: ${{ steps.config.outputs.attachments_bucket }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update >/dev/null
+
+          export AWS_DEFAULT_REGION="${STORAGE_REGION}"
+          if [ -n "${STORAGE_ENDPOINT}" ]; then
+            ENDPOINT_FLAG="--endpoint-url ${STORAGE_ENDPOINT}"
+          else
+            ENDPOINT_FLAG=""
+          fi
+
+          FAILED=0
+          for bucket in "${ATTACHMENTS_BUCKET}"; do
+            if aws s3 ls "s3://${bucket}" ${ENDPOINT_FLAG} >/dev/null 2>&1; then
+              echo "${bucket} accessible"
+            else
+              echo "Cannot access ${bucket}"
+              FAILED=1
+            fi
+          done
+
+          if [ "${FAILED}" -eq 1 ]; then
+            echo "FATAL: S3 buckets not accessible"
+            exit 1
+          fi
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519_deploy
+
+      - name: Environment health summary
+        if: success()
+        run: |
+          echo "=== ENVIRONMENT HEALTH CHECK PASSED ==="
+          echo "Validated deploy host, core secrets, storage, and email configuration."

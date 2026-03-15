@@ -1,0 +1,47 @@
+# Sudoers configuration for hectic user
+# Installed by setup.sh to /etc/sudoers.d/hectic
+#
+# Allows the hectic user to manage services and deploy binaries
+# without password prompts (required for CI/CD automation)
+
+# Blue-green service management
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl start hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl stop hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl restart hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl status hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl enable hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl disable hectic-blue
+
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl start hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl stop hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl restart hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl status hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl enable hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl disable hectic-green
+
+# Legacy service removal (for migration)
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl stop hectic
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl disable hectic
+
+# Systemd reload
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
+
+# Caddy management
+hectic ALL=(ALL) NOPASSWD: /bin/systemctl reload caddy
+
+# File operations for deployment
+hectic ALL=(ALL) NOPASSWD: /bin/cp /tmp/hectic-extract/hectic-server /opt/hectic/hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/cp /tmp/hectic-extract/hectic-server /opt/hectic/hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/cp /opt/hectic/hectic-blue.service /etc/systemd/system/
+hectic ALL=(ALL) NOPASSWD: /bin/cp /opt/hectic/hectic-green.service /etc/systemd/system/
+hectic ALL=(ALL) NOPASSWD: /bin/chown hectic\:hectic /opt/hectic/hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/chown hectic\:hectic /opt/hectic/hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/chown hectic\:hectic /opt/hectic/.active-slot
+hectic ALL=(ALL) NOPASSWD: /bin/chmod +x /opt/hectic/hectic-blue
+hectic ALL=(ALL) NOPASSWD: /bin/chmod +x /opt/hectic/hectic-green
+hectic ALL=(ALL) NOPASSWD: /bin/rm -f /etc/systemd/system/hectic.service
+hectic ALL=(ALL) NOPASSWD: /usr/bin/tee /opt/hectic/.active-slot
+
+# Log access for monitoring and debugging
+hectic ALL=(ALL) NOPASSWD: /bin/journalctl -u hectic-blue *
+hectic ALL=(ALL) NOPASSWD: /bin/journalctl -u hectic-green *

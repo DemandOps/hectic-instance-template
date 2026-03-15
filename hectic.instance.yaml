@@ -1,0 +1,73 @@
+apiVersion: hectic.demandops.com/v1alpha1
+kind: HecticInstance
+metadata:
+  name: acme-prod
+  instanceID: replace-with-generated-instance-id
+spec:
+  environment: production
+  domain:
+    app: hectic.example.com
+    admin: admin.hectic.example.com
+    api: api.hectic.example.com
+    cookie: .example.com
+  deployment:
+    strategy: blue-green
+    linuxTarget:
+      host: replace-with-host
+      rootDir: /opt/hectic
+    release:
+      core:
+        version: v0.1.0
+        servicesArtifact: ghcr.io/demandops/hectic-services:v0.1.0
+        deployArtifact: ghcr.io/demandops/hectic-deploy:v0.1.0
+        migrationsArtifact: ghcr.io/demandops/hectic-migrations:v0.1.0
+        manifestArtifact: ghcr.io/demandops/hectic-manifest:v0.1.0
+  auth:
+    mode: magic-link
+    breakGlassAdminEmail: owner@example.com
+  email:
+    outbound:
+      provider: postmark
+      fromEmail: support@example.com
+      fromName: Example Support
+      smtp:
+        host: smtp.example.com
+        port: 587
+      ses:
+        region: us-east-1
+    inbound:
+      mode: webhook
+      provider: postmark
+  storage:
+    provider: s3-compatible
+    region: ams3
+    endpoint: https://ams3.digitaloceanspaces.com
+    attachmentsBucket: hectic-attachments-example
+  monitoring:
+    internalHealth: true
+    internalMetrics: true
+  agent:
+    bootstrap:
+      createAdmin: true
+      createWorkspace: true
+      seedDefaults: true
+      runThreatModelPrompt: true
+  extensions:
+    autoActivateAfterInstall: false
+    desiredStateFile: extensions/desired-state.yaml
+    policy:
+      allowCustomExtensions: true
+      allowMarketplaceExtensions: false
+      genericRuntimeAllowedKinds:
+        - product
+        - operational
+      genericRuntimeAllowedRisk:
+        - standard
+      requireThreatModelReview: true
+      requireStagingValidation: true
+      blockPrivilegedCustomExtensions: true
+  branding:
+    file: branding/site.json
+  security:
+    extensionThreatModelFile: security/extension-threat-model.md
+    extensionReviewChecklistFile: security/review-checklist.md

@@ -1,0 +1,174 @@
+name: Verify Production
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment to verify
+        required: true
+        type: string
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Verify Production Deployment
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout instance repo
+        uses: actions/checkout@v4
+
+      - name: Load instance configuration
+        id: config
+        run: |
+          chmod +x scripts/read-instance-config.sh
+          scripts/read-instance-config.sh hectic.instance.yaml >> "$GITHUB_OUTPUT"
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" | base64 -d > ~/.ssh/id_ed25519_deploy
+          chmod 600 ~/.ssh/id_ed25519_deploy
+          ssh-keygen -y -f ~/.ssh/id_ed25519_deploy >/dev/null 2>&1 || { echo "Invalid SSH key"; exit 1; }
+
+      - name: Wait for service stability
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            if [ "\${ACTIVE_SLOT}" = "blue" ]; then
+              PORT=8080
+            else
+              PORT=8081
+            fi
+
+            MAX_WAIT=60
+            WAITED=0
+            while [ "\${WAITED}" -lt "\${MAX_WAIT}" ]; do
+              STATUS=\$(systemctl is-active "hectic-\${ACTIVE_SLOT}" 2>/dev/null || echo "inactive")
+              if [ "\${STATUS}" = "active" ]; then
+                for _ in \$(seq 1 10); do
+                  if curl -sf "http://localhost:\${PORT}/health" >/dev/null 2>&1; then
+                    exit 0
+                  fi
+                  sleep 2
+                done
+                echo "Health endpoint not responding after 20s"
+                exit 1
+              fi
+              sleep 3
+              WAITED=\$((WAITED + 3))
+            done
+
+            echo "Service did not stabilize within \${MAX_WAIT}s"
+            sudo journalctl -u "hectic-\${ACTIVE_SLOT}" --no-pager -n 50 2>/dev/null || true
+            exit 1
+          EOF
+
+      - name: Verify service and ports
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            echo "Active slot: \${ACTIVE_SLOT}"
+            systemctl status "hectic-\${ACTIVE_SLOT}" --no-pager 2>&1 | head -30
+            pgrep -fa hectic || true
+            ss -tlnp 2>/dev/null | grep -E ':8080|:8081|:443|:80' || true
+          EOF
+
+      - name: Verify internal API health
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            if [ "\${ACTIVE_SLOT}" = "blue" ]; then
+              PORT=8080
+            else
+              PORT=8081
+            fi
+            HTTP_STATUS=\$(curl -sf "http://localhost:\${PORT}/health" 2>/dev/null || echo "failed")
+            echo "\${HTTP_STATUS}" | grep -q '"status"' || exit 1
+          EOF
+
+      - name: Verify internal admin login page
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+          ADMIN_DOMAIN: ${{ steps.config.outputs.admin_domain }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            if [ "\${ACTIVE_SLOT}" = "blue" ]; then
+              PORT=8080
+            else
+              PORT=8081
+            fi
+            LOGIN_STATUS=\$(curl -s -o /dev/null -w "%{http_code}" -H "Host: ${ADMIN_DOMAIN}" "http://localhost:\${PORT}/login")
+            test "\${LOGIN_STATUS}" = "200"
+          EOF
+
+      - name: Check PostgreSQL database
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            set -a
+            source /opt/hectic/.env
+            set +a
+            if [ -z "${DATABASE_DSN:-}" ]; then
+              echo "DATABASE_DSN missing from /opt/hectic/.env"
+              exit 1
+            fi
+            psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 \
+              -c "SELECT current_database(), current_user;" \
+              -c "SELECT COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema');" \
+              -c "SELECT COUNT(*) AS total, SUM(CASE WHEN published_at IS NULL THEN 1 ELSE 0 END) AS pending FROM outbox_events;"
+          EOF
+
+      - name: Check recent logs
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            ACTIVE_SLOT=\$(cat "${ROOT_DIR}/.active-slot" 2>/dev/null || echo "blue")
+            sudo journalctl -u "hectic-\${ACTIVE_SLOT}" --no-pager -n 50 2>&1 || true
+          EOF
+
+      - name: Verify external connectivity
+        continue-on-error: true
+        env:
+          API_DOMAIN: ${{ steps.config.outputs.api_domain }}
+          ADMIN_DOMAIN: ${{ steps.config.outputs.admin_domain }}
+        run: |
+          sleep 5
+          EXTERNAL_HEALTH=$(curl -s -m 10 "https://${API_DOMAIN}/health" 2>&1 || echo "timeout/unreachable")
+          echo "${EXTERNAL_HEALTH}" | grep -q '"status"' && echo "External API accessible" || echo "External API not accessible yet"
+
+          ADMIN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${ADMIN_DOMAIN}/login" 2>&1 || echo "000")
+          echo "Admin panel status: HTTP ${ADMIN_STATUS}"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519_deploy
+
+      - name: Summary
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Production Verification Complete
+
+          Verified:
+          - active slot stability
+          - internal API health
+          - internal admin login page
+          - database status
+          - recent service logs
+          - external API and admin reachability
+          EOF

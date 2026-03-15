@@ -1,0 +1,41 @@
+extensions:
+  installed:
+    - slug: ats
+      source: oci
+      ref: ghcr.io/demandops/hectic-ext-ats:v1.0.0
+      publisher: DemandOps
+      kind: product
+      scope: workspace
+      risk: standard
+      licenseRequired: true
+      workspace: people
+      activate: false
+      verification:
+        requiresThreatModel: false
+        requiresStagingValidation: true
+    - slug: web-analytics
+      source: oci
+      ref: ghcr.io/demandops/hectic-ext-web-analytics:v1.0.0
+      publisher: DemandOps
+      kind: product
+      scope: workspace
+      risk: standard
+      licenseRequired: true
+      workspace: marketing
+      activate: false
+      verification:
+        requiresThreatModel: false
+        requiresStagingValidation: true
+  planned:
+    - slug: enterprise-access
+      publisher: DemandOps
+      kind: identity
+      scope: instance
+      risk: privileged
+      reason: enable OIDC for staff
+    - slug: error-tracking
+      publisher: DemandOps
+      kind: product
+      scope: workspace
+      risk: standard
+      reason: add Sentry-compatible issue workflows

@@ -1,0 +1,393 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout instance repo
+        uses: actions/checkout@v4
+
+      - name: Load instance configuration
+        id: config
+        run: |
+          chmod +x scripts/read-instance-config.sh
+          scripts/read-instance-config.sh hectic.instance.yaml >> "$GITHUB_OUTPUT"
+
+      - name: Install ORAS
+        run: |
+          VERSION="1.2.3"
+          curl -LO "https://github.com/oras-project/oras/releases/download/v${VERSION}/oras_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf "oras_${VERSION}_linux_amd64.tar.gz"
+          sudo mv oras /usr/local/bin/
+          oras version
+
+      - name: Optional registry login
+        env:
+          SERVICES_ARTIFACT: ${{ steps.config.outputs.services_artifact }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          if [[ -n "${REGISTRY_USERNAME}" && -n "${REGISTRY_TOKEN}" ]]; then
+            REGISTRY_HOST=$(printf '%s\n' "${SERVICES_ARTIFACT}" | cut -d/ -f1)
+            oras login "${REGISTRY_HOST}" --username "${REGISTRY_USERNAME}" --password "${REGISTRY_TOKEN}"
+          else
+            echo "No registry credentials provided; assuming public artifact access"
+          fi
+
+      - name: Pull release artifacts
+        env:
+          SERVICES_ARTIFACT: ${{ steps.config.outputs.services_artifact }}
+          MIGRATIONS_ARTIFACT: ${{ steps.config.outputs.migrations_artifact }}
+          DEPLOY_ARTIFACT: ${{ steps.config.outputs.deploy_artifact }}
+          MANIFEST_ARTIFACT: ${{ steps.config.outputs.manifest_artifact }}
+        run: |
+          mkdir -p artifacts
+          cd artifacts
+
+          oras pull "${SERVICES_ARTIFACT}"
+          tar -xzf hectic-services.tar.gz
+          rm hectic-services.tar.gz
+
+          mkdir -p migrations
+          oras pull "${MIGRATIONS_ARTIFACT}"
+          tar -xzf migrations.tar.gz -C migrations
+          rm migrations.tar.gz
+
+          mkdir -p deploy
+          oras pull "${DEPLOY_ARTIFACT}"
+          tar -xzf deploy.tar.gz -C deploy
+          rm deploy.tar.gz
+
+          oras pull "${MANIFEST_ARTIFACT}"
+          echo "Release manifest:"
+          cat manifest.json | jq .
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" | base64 -d > ~/.ssh/id_ed25519_deploy
+          chmod 600 ~/.ssh/id_ed25519_deploy
+          if ! grep -q "PRIVATE KEY" ~/.ssh/id_ed25519_deploy; then
+            echo "Invalid SSH key format"
+            exit 1
+          fi
+          ssh-keygen -y -f ~/.ssh/id_ed25519_deploy >/dev/null 2>&1 || { echo "Invalid SSH key"; exit 1; }
+
+      - name: Determine deployment slot
+        id: slot
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          ACTIVE_SLOT=$(ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" \
+            "cat ${ROOT_DIR}/.active-slot 2>/dev/null || echo blue" 2>/dev/null || echo "blue")
+
+          if [ "${ACTIVE_SLOT}" = "blue" ]; then
+            DEPLOY_SLOT="green"
+            DEPLOY_PORT="8081"
+            OLD_PORT="8080"
+          else
+            DEPLOY_SLOT="blue"
+            DEPLOY_PORT="8080"
+            OLD_PORT="8081"
+          fi
+
+          echo "active_slot=${ACTIVE_SLOT}" >> "$GITHUB_OUTPUT"
+          echo "deploy_slot=${DEPLOY_SLOT}" >> "$GITHUB_OUTPUT"
+          echo "deploy_port=${DEPLOY_PORT}" >> "$GITHUB_OUTPUT"
+          echo "old_port=${OLD_PORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create deployment package
+        run: |
+          cd artifacts
+          tar -czf /tmp/hectic-deploy.tar.gz hectic-server tools/ migrations/ deploy/ manifest.json
+
+      - name: Upload deployment package
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+        run: |
+          scp -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no \
+            /tmp/hectic-deploy.tar.gz \
+            "hectic@${DEPLOY_HOST}:/tmp/"
+
+      - name: Create environment file
+        env:
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+          APP_DOMAIN: ${{ steps.config.outputs.app_domain }}
+          COOKIE_DOMAIN: ${{ steps.config.outputs.cookie_domain }}
+          EMAIL_PROVIDER: ${{ steps.config.outputs.email_provider }}
+          FROM_EMAIL: ${{ steps.config.outputs.email_from_email }}
+          FROM_NAME: ${{ steps.config.outputs.email_from_name }}
+          INBOUND_MODE: ${{ steps.config.outputs.inbound_mode }}
+          INBOUND_PROVIDER: ${{ steps.config.outputs.inbound_provider }}
+          STORAGE_PROVIDER: ${{ steps.config.outputs.storage_provider }}
+          STORAGE_REGION: ${{ steps.config.outputs.storage_region }}
+          STORAGE_ENDPOINT: ${{ steps.config.outputs.storage_endpoint }}
+          ATTACHMENTS_BUCKET: ${{ steps.config.outputs.attachments_bucket }}
+          DATABASE_DSN: ${{ secrets.DATABASE_DSN }}
+          SMTP_HOST: ${{ steps.config.outputs.smtp_host }}
+          SMTP_PORT: ${{ steps.config.outputs.smtp_port }}
+          SES_REGION: ${{ steps.config.outputs.ses_region }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+          POSTMARK_SERVER_TOKEN: ${{ secrets.POSTMARK_SERVER_TOKEN }}
+          POSTMARK_WEBHOOK_SECRET: ${{ secrets.POSTMARK_WEBHOOK_SECRET }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SES_ACCESS_KEY: ${{ secrets.SES_ACCESS_KEY }}
+          SES_SECRET_KEY: ${{ secrets.SES_SECRET_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          cat > /tmp/hectic.env.tmp <<EOF
+          ENVIRONMENT=${{ inputs.environment }}
+          DOMAIN=${APP_DOMAIN}
+          DATABASE_DSN=${DATABASE_DSN}
+          JWT_SECRET=${JWT_SECRET}
+          JWT_EXPIRY=24h
+          MAGIC_LINK_TTL=15m
+          COOKIE_DOMAIN=${COOKIE_DOMAIN}
+          EMAIL_BACKEND=${EMAIL_PROVIDER}
+          FROM_EMAIL=${FROM_EMAIL}
+          FROM_NAME=${FROM_NAME}
+          STORAGE_PATH=${ROOT_DIR}/data
+          CACHE_ENABLED=true
+          CACHE_TTL=1h
+          RATE_LIMIT_ENABLED=true
+          RATE_LIMIT_PER_MIN=60
+          METRICS_TOKEN=${METRICS_TOKEN}
+          TRUSTED_PROXIES=127.0.0.1,::1
+          EOF
+
+          case "${STORAGE_PROVIDER}" in
+            s3-compatible)
+              cat >> /tmp/hectic.env.tmp <<EOF
+          STORAGE_TYPE=s3
+          S3_REGION=${STORAGE_REGION}
+          S3_ENDPOINT=${STORAGE_ENDPOINT}
+          S3_ATTACHMENTS_BUCKET=${ATTACHMENTS_BUCKET}
+          AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+          AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+          EOF
+              ;;
+            filesystem)
+              cat >> /tmp/hectic.env.tmp <<EOF
+          STORAGE_TYPE=filesystem
+          EOF
+              ;;
+          esac
+
+          case "${EMAIL_PROVIDER}" in
+            postmark)
+              cat >> /tmp/hectic.env.tmp <<EOF
+          POSTMARK_SERVER_TOKEN=${POSTMARK_SERVER_TOKEN}
+          EOF
+              if [[ "${INBOUND_MODE}" == "webhook" && "${INBOUND_PROVIDER}" == "postmark" ]]; then
+                cat >> /tmp/hectic.env.tmp <<EOF
+          POSTMARK_WEBHOOK_SECRET=${POSTMARK_WEBHOOK_SECRET}
+          EOF
+              fi
+              ;;
+            smtp)
+              cat >> /tmp/hectic.env.tmp <<EOF
+          SMTP_HOST=${SMTP_HOST}
+          SMTP_PORT=${SMTP_PORT}
+          SMTP_USERNAME=${SMTP_USERNAME}
+          SMTP_PASSWORD=${SMTP_PASSWORD}
+          EOF
+              ;;
+            ses)
+              cat >> /tmp/hectic.env.tmp <<EOF
+          SES_REGION=${SES_REGION}
+          SES_ACCESS_KEY=${SES_ACCESS_KEY}
+          SES_SECRET_KEY=${SES_SECRET_KEY}
+          EOF
+              ;;
+          esac
+
+          sed 's/^[[:space:]]*//' /tmp/hectic.env.tmp > /tmp/hectic.env
+          rm /tmp/hectic.env.tmp
+
+      - name: Upload environment file
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+        run: |
+          scp -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no \
+            /tmp/hectic.env \
+            "hectic@${DEPLOY_HOST}:${ROOT_DIR}/.env"
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" \
+            "chmod 600 ${ROOT_DIR}/.env"
+
+      - name: Deploy to inactive slot
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          ROOT_DIR: ${{ steps.config.outputs.root_dir }}
+          DEPLOY_SLOT: ${{ steps.slot.outputs.deploy_slot }}
+          ACTIVE_SLOT: ${{ steps.slot.outputs.active_slot }}
+          DEPLOY_PORT: ${{ steps.slot.outputs.deploy_port }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" <<EOF
+            set -e
+
+            echo "=== Blue-green deploy: ${ACTIVE_SLOT} -> ${DEPLOY_SLOT} ==="
+            cd "${ROOT_DIR}"
+
+            rm -rf /tmp/hectic-extract
+            mkdir -p /tmp/hectic-extract
+            tar -xzf /tmp/hectic-deploy.tar.gz -C /tmp/hectic-extract
+
+            if [ -f /etc/systemd/system/hectic.service ]; then
+              sudo systemctl stop hectic 2>/dev/null || true
+              sudo systemctl disable hectic 2>/dev/null || true
+              sudo rm -f /etc/systemd/system/hectic.service
+              sudo systemctl daemon-reload
+            fi
+
+            sudo systemctl stop "hectic-${DEPLOY_SLOT}" 2>/dev/null || true
+            sleep 1
+
+            sudo /bin/cp /tmp/hectic-extract/hectic-server "${ROOT_DIR}/hectic-${DEPLOY_SLOT}"
+            sudo chown hectic:hectic "${ROOT_DIR}/hectic-${DEPLOY_SLOT}"
+            sudo chmod +x "${ROOT_DIR}/hectic-${DEPLOY_SLOT}"
+
+            mkdir -p tools
+            rsync -av --delete /tmp/hectic-extract/tools/ tools/ || true
+            chmod +x tools/* 2>/dev/null || true
+
+            cp /tmp/hectic-extract/deploy/*.service "${ROOT_DIR}/" 2>/dev/null || true
+
+            if ! diff -q "${ROOT_DIR}/hectic-blue.service" /etc/systemd/system/hectic-blue.service >/dev/null 2>&1; then
+              sudo /bin/cp "${ROOT_DIR}/hectic-blue.service" /etc/systemd/system/
+            fi
+            if ! diff -q "${ROOT_DIR}/hectic-green.service" /etc/systemd/system/hectic-green.service >/dev/null 2>&1; then
+              sudo /bin/cp "${ROOT_DIR}/hectic-green.service" /etc/systemd/system/
+            fi
+
+            sudo systemctl daemon-reload
+            sudo systemctl start "hectic-${DEPLOY_SLOT}"
+
+            HEALTHY=false
+            for i in \$(seq 1 30); do
+              if curl -sf --max-time 5 "http://localhost:${DEPLOY_PORT}/health" >/dev/null 2>&1; then
+                HEALTHY=true
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "\${HEALTHY}" = "false" ]; then
+              sudo systemctl stop "hectic-${DEPLOY_SLOT}" || true
+              sudo journalctl -u "hectic-${DEPLOY_SLOT}" --no-pager -n 30
+              exit 1
+            fi
+
+            sudo systemctl stop "hectic-${ACTIVE_SLOT}" 2>/dev/null || true
+            sudo systemctl disable "hectic-${ACTIVE_SLOT}" 2>/dev/null || true
+            sudo systemctl enable "hectic-${DEPLOY_SLOT}" 2>/dev/null || true
+
+            echo "${DEPLOY_SLOT}" | sudo tee "${ROOT_DIR}/.active-slot" >/dev/null
+            sudo chown hectic:hectic "${ROOT_DIR}/.active-slot"
+
+            rm -rf /tmp/hectic-extract /tmp/hectic-deploy.tar.gz
+          EOF
+
+      - name: Post-deployment health verification
+        env:
+          DEPLOY_HOST: ${{ steps.config.outputs.deploy_host }}
+          DEPLOY_PORT: ${{ steps.slot.outputs.deploy_port }}
+        run: |
+          sleep 5
+          HEALTH=$(ssh -i ~/.ssh/id_ed25519_deploy -o StrictHostKeyChecking=no "hectic@${DEPLOY_HOST}" \
+            "curl -sf http://localhost:${DEPLOY_PORT}/health" 2>&1 || echo '{"status":"failed"}')
+          echo "Internal health: ${HEALTH}"
+          if echo "${HEALTH}" | grep -q "failed"; then
+            echo "Health verification failed"
+            exit 1
+          fi
+
+      - name: Smoke tests
+        env:
+          API_DOMAIN: ${{ steps.config.outputs.api_domain }}
+          ADMIN_DOMAIN: ${{ steps.config.outputs.admin_domain }}
+        run: |
+          sleep 10
+
+          FAILED=0
+          API_URL="https://${API_DOMAIN}"
+          ADMIN_URL="https://${ADMIN_DOMAIN}"
+
+          API_HEALTH=$(curl -sf -m 15 "${API_URL}/health" 2>&1) || {
+            echo "API health endpoint failed"
+            FAILED=1
+          }
+          echo "API health: ${API_HEALTH}"
+
+          ADMIN_HEALTH=$(curl -sf -m 15 "${ADMIN_URL}/health" 2>&1) || {
+            echo "Admin health endpoint failed"
+            FAILED=1
+          }
+          echo "Admin health: ${ADMIN_HEALTH}"
+
+          LOGIN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "${ADMIN_URL}/login")
+          if [ "${LOGIN_STATUS}" -ne 200 ]; then
+            echo "Login page returned ${LOGIN_STATUS}"
+            FAILED=1
+          fi
+
+          if [ "${FAILED}" -ne 0 ]; then
+            echo "Smoke tests failed"
+            exit 1
+          fi
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519_deploy
+
+      - name: Create deployment summary
+        env:
+          CORE_VERSION: ${{ steps.config.outputs.core_version }}
+          DEPLOY_SLOT: ${{ steps.slot.outputs.deploy_slot }}
+          ACTIVE_SLOT: ${{ steps.slot.outputs.active_slot }}
+          DEPLOY_PORT: ${{ steps.slot.outputs.deploy_port }}
+          SERVICES_ARTIFACT: ${{ steps.config.outputs.services_artifact }}
+          MIGRATIONS_ARTIFACT: ${{ steps.config.outputs.migrations_artifact }}
+          DEPLOY_ARTIFACT: ${{ steps.config.outputs.deploy_artifact }}
+          APP_DOMAIN: ${{ steps.config.outputs.app_domain }}
+          ADMIN_DOMAIN: ${{ steps.config.outputs.admin_domain }}
+          API_DOMAIN: ${{ steps.config.outputs.api_domain }}
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Deployment Complete
+
+          **Environment**: ${{ inputs.environment }}
+          **Core Version**: ${CORE_VERSION}
+          **Deployment Slot**: ${DEPLOY_SLOT}
+
+          ### Blue-Green Deployment
+          - Previous slot: ${ACTIVE_SLOT}
+          - New slot: ${DEPLOY_SLOT}
+          - Port: ${DEPLOY_PORT}
+
+          ### Artifacts Deployed
+          - \`${SERVICES_ARTIFACT}\`
+          - \`${MIGRATIONS_ARTIFACT}\`
+          - \`${DEPLOY_ARTIFACT}\`
+
+          ### Endpoints
+          - https://${APP_DOMAIN}
+          - https://${ADMIN_DOMAIN}
+          - https://${API_DOMAIN}
+          EOF
